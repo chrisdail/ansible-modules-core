@@ -389,13 +389,6 @@ def main():
 
     dict_headers = {}
 
-    # If body_format is json, encodes the body (wich can be a dict or a list) and automatically sets the Content-Type header
-    if body_format == 'json':
-        body = json.dumps(body)
-        dict_headers['Content-Type'] = 'application/json'
-
-    dict_headers = {}
-
     # If body_format is json or yaml, encore the body (wich can be a dict or a list) and automatically sets the Content-Type header
     if body_format == 'json':
         body = json.dumps(body)
