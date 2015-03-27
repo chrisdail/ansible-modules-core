@@ -67,7 +67,7 @@ options:
     default: null
   body_format:
     description:
-      - The serialization format of the body. Either raw, or json. When set to json, encodes the body argument and automatically sets the Content-Type header accordingly.
+      - The serialization format of the body. Either raw, json, or yaml. When set to json or yaml, encodes the body argument and automatically sets the Content-Type header accordingly.
     required: false
     default: raw
   method:
@@ -252,11 +252,11 @@ def url_filename(url):
     return fn
 
 
-def uri(module, url, dest, user, password, body, method, headers, redirects, socket_timeout, validate_certs):
+def uri(module, url, dest, user, password, body, body_format, method, headers, redirects, socket_timeout, validate_certs):
     # To debug
     #httplib2.debug = 4
 
-    # Handle Redirects         
+    # Handle Redirects
     if redirects == "all" or redirects == "yes":
         follow_redirects = True
         follow_all_redirects = True
@@ -351,7 +351,7 @@ def main():
             user = dict(required=False, default=None),
             password = dict(required=False, default=None),
             body = dict(required=False, default=None),
-            body_format = dict(required=False, default='raw', choices=['raw', 'json']),
+            body_format = dict(required=False, default='raw', choices=['raw', 'json', 'yaml']),
             method = dict(required=False, default='GET', choices=['GET', 'POST', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'PATCH']),
             return_content = dict(required=False, default='no', type='bool'),
             force_basic_auth = dict(required=False, default='no', type='bool'),
@@ -375,6 +375,7 @@ def main():
     user = module.params['user']
     password = module.params['password']
     body = module.params['body']
+    body_format = module.params['body_format']
     method = module.params['method']
     dest = module.params['dest']
     return_content = module.params['return_content']
@@ -393,14 +394,24 @@ def main():
         body = json.dumps(body)
         dict_headers['Content-Type'] = 'application/json'
 
-    # Grab all the http headers. Need this hack since passing multi-values is currently a bit ugly. (e.g. headers='{"Content-Type":"application/json"}')
     dict_headers = {}
+
+    # If body_format is json or yaml, encore the body (wich can be a dict or a list) and automatically sets the Content-Type header
+    if body_format == 'json':
+        body = json.dumps(body)
+        dict_headers['Content-Type'] = 'application/json'
+    elif body_format == 'yaml':
+        body = yaml.dump(body)
+        dict_headers['Content-Type'] = 'application/yaml'
+
+
+    # Grab all the http headers. Need this hack since passing multi-values is currently a bit ugly. (e.g. headers='{"Content-Type":"application/json"}')
     for key, value in module.params.iteritems():
         if key.startswith("HEADER_"):
             skey = key.replace("HEADER_", "")
             dict_headers[skey] = value
 
-  
+
     if creates is not None:
         # do not run the command if the line contains creates=filename
         # and the filename already exists.  This allows idempotence
@@ -426,7 +437,7 @@ def main():
 
 
     # Make the request
-    resp, content, dest = uri(module, url, dest, user, password, body, method, dict_headers, redirects, socket_timeout, validate_certs)
+    resp, content, dest = uri(module, url, dest, user, password, body, body_format, method, dict_headers, redirects, socket_timeout, validate_certs)
     resp['status'] = int(resp['status'])
 
     # Write the file out if requested
@@ -448,7 +459,7 @@ def main():
     # Transmogrify the headers, replacing '-' with '_', since variables dont work with dashes.
     uresp = {}
     for key, value in resp.iteritems():
-        ukey = key.replace("-", "_")  
+        ukey = key.replace("-", "_")
         uresp[ukey] = value
 
     # Default content_encoding to try
