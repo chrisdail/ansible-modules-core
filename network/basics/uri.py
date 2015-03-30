@@ -65,6 +65,11 @@ options:
       - The body of the http request/response to the web service.
     required: false
     default: null
+  body_format:
+    description:
+      - The serialization format of the body. Either raw, or json. When set to json, encodes the body argument and automatically sets the Content-Type header accordingly.
+    required: false
+    default: raw
   method:
     description:
       - The HTTP method of the request or response.
@@ -346,6 +351,7 @@ def main():
             user = dict(required=False, default=None),
             password = dict(required=False, default=None),
             body = dict(required=False, default=None),
+            body_format = dict(required=False, default='raw', choices=['raw', 'json']),
             method = dict(required=False, default='GET', choices=['GET', 'POST', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'PATCH']),
             return_content = dict(required=False, default='no', type='bool'),
             force_basic_auth = dict(required=False, default='no', type='bool'),
@@ -379,6 +385,13 @@ def main():
     status_code = [int(x) for x in list(module.params['status_code'])]
     socket_timeout = module.params['timeout']
     validate_certs = module.params['validate_certs']
+
+    dict_headers = {}
+
+    # If body_format is json, encodes the body (wich can be a dict or a list) and automatically sets the Content-Type header
+    if body_format == 'json':
+        body = json.dumps(body)
+        dict_headers['Content-Type'] = 'application/json'
 
     # Grab all the http headers. Need this hack since passing multi-values is currently a bit ugly. (e.g. headers='{"Content-Type":"application/json"}')
     dict_headers = {}
