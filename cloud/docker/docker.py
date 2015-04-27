@@ -502,6 +502,8 @@ class DockerManager(object):
             'volumes_from': ((0, 3, 0), '1.10'),
             'restart_policy': ((0, 5, 0), '1.14'),
             'pid': ((1, 0, 0), '1.17'),
+            'log_driver': ((1, 2, 0), '1.18'),
+            'host_config': ((0, 7, 0), '1.15'),
             # Clientside only
             'insecure_registry': ((0, 5, 0), '0.0')
             }
@@ -708,6 +710,52 @@ class DockerManager(object):
             return exposed
         else:
             return None
+
+    def get_start_params(self):
+        """
+        Create start params
+        """
+        params = {
+            'lxc_conf': self.lxc_conf,
+            'binds': self.binds,
+            'port_bindings': self.port_bindings,
+            'publish_all_ports': self.module.params.get('publish_all_ports'),
+            'privileged': self.module.params.get('privileged'),
+            'links': self.links,
+            'network_mode': self.module.params.get('net'),
+        }
+
+        optionals = {}
+        for optional_param in ('dns', 'volumes_from', 'restart_policy',
+                'restart_policy_retry', 'pid'):
+            optionals[optional_param] = self.module.params.get(optional_param)
+
+        if optionals['dns'] is not None:
+            self.ensure_capability('dns')
+            params['dns'] = optionals['dns']
+
+        if optionals['volumes_from'] is not None:
+            self.ensure_capability('volumes_from')
+            params['volumes_from'] = optionals['volumes_from']
+
+        if optionals['restart_policy'] is not None:
+            self.ensure_capability('restart_policy')
+            params['restart_policy'] = { 'Name': optionals['restart_policy'] }
+            if params['restart_policy']['Name'] == 'on-failure':
+                params['restart_policy']['MaximumRetryCount'] = optionals['restart_policy_retry']
+
+        if optionals['pid'] is not None:
+            self.ensure_capability('pid')
+            params['pid_mode'] = optionals['pid']
+
+        return params
+
+    def get_host_config(self):
+        """
+        Create HostConfig object
+        """
+        params = self.get_start_params()
+        return docker.utils.create_host_config(**params)
 
     def get_port_bindings(self, ports):
         """
@@ -1213,6 +1261,9 @@ class DockerManager(object):
                   'tty':          self.module.params.get('tty'),
                   }
 
+        if self.ensure_capability('host_config', fail=False):
+            params['host_config'] = self.get_host_config()
+
         def do_create(count, params):
             results = []
             for _ in range(count):
@@ -1234,38 +1285,10 @@ class DockerManager(object):
         return containers
 
     def start_containers(self, containers):
-        params = {
-            'lxc_conf': self.lxc_conf,
-            'binds': self.binds,
-            'port_bindings': self.port_bindings,
-            'publish_all_ports': self.module.params.get('publish_all_ports'),
-            'privileged': self.module.params.get('privileged'),
-            'links': self.links,
-            'network_mode': self.module.params.get('net'),
-        }
+        params = {}
 
-        optionals = {}
-        for optional_param in ('dns', 'volumes_from', 'restart_policy',
-                'restart_policy_retry', 'pid'):
-            optionals[optional_param] = self.module.params.get(optional_param)
-
-        if optionals['dns'] is not None:
-            self.ensure_capability('dns')
-            params['dns'] = optionals['dns']
-
-        if optionals['volumes_from'] is not None:
-            self.ensure_capability('volumes_from')
-            params['volumes_from'] = optionals['volumes_from']
-
-        if optionals['restart_policy'] is not None:
-            self.ensure_capability('restart_policy')
-            params['restart_policy'] = { 'Name': optionals['restart_policy'] }
-            if params['restart_policy']['Name'] == 'on-failure':
-                params['restart_policy']['MaximumRetryCount'] = optionals['restart_policy_retry']
-
-        if optionals['pid'] is not None:
-            self.ensure_capability('pid')
-            params['pid_mode'] = optionals['pid']
+        if not self.ensure_capability('host_config', fail=False):
+            params = self.get_start_params()
 
         for i in containers:
             self.client.start(i['Id'], **params)
