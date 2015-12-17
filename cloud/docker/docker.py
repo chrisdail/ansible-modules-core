@@ -893,6 +893,9 @@ class DockerManager(object):
         running = self.get_running_containers()
         current = self.get_inspect_containers(running)
 
+        #Get API version
+        api_version = self.client.version()['ApiVersion']
+
         image = self.get_inspect_image()
         if image is None:
             # The image isn't present. Assume that we're about to pull a new
@@ -941,11 +944,11 @@ class DockerManager(object):
 
             # VOLUMES
 
-            expected_volume_keys = set((image['ContainerConfig']['Volumes'] or {}).keys())
+            expected_volume_keys = set((image['ContainerConfig'].get('Volumes') or {}).keys())
             if self.volumes:
                 expected_volume_keys.update(self.volumes.keys())
 
-            actual_volume_keys = set((container['Config']['Volumes'] or {}).keys())
+            actual_volume_keys = set((container['Config'].get('Volumes') or {}).keys())
 
             if actual_volume_keys != expected_volume_keys:
                 self.reload_reasons.append('volumes ({0} => {1})'.format(actual_volume_keys, expected_volume_keys))
@@ -955,7 +958,12 @@ class DockerManager(object):
             # MEM_LIMIT
 
             expected_mem = _human_to_bytes(self.module.params.get('memory_limit'))
-            actual_mem = container['Config']['Memory']
+
+            #For v1.19 API and above use HostConfig, otherwise use Config
+            if api_version >= 1.19:
+                actual_mem = container['HostConfig']['Memory']
+            else:
+                actual_mem = container['Config']['Memory']
 
             if expected_mem and actual_mem != expected_mem:
                 self.reload_reasons.append('memory ({0} => {1})'.format(actual_mem, expected_mem))
@@ -968,7 +976,7 @@ class DockerManager(object):
 
             expected_env = {}
 
-            for image_env in image['ContainerConfig']['Env'] or []:
+            for image_env in image['ContainerConfig'].get('Env') or []:
                 name, value = image_env.split('=', 1)
                 expected_env[name] = value
 
@@ -977,7 +985,7 @@ class DockerManager(object):
                     expected_env[name] = str(value)
 
             actual_env = {}
-            for container_env in container['Config']['Env'] or []:
+            for container_env in container['Config'].get('Env') or []:
                 name, value = container_env.split('=', 1)
                 actual_env[name] = value
 
@@ -1040,7 +1048,7 @@ class DockerManager(object):
 
             if self.lxc_conf:
                 expected_lxc = set(self.lxc_conf)
-                actual_lxc = set(container['HostConfig']['LxcConf'] or [])
+                actual_lxc = set(container['HostConfig'].get('LxcConf') or [])
                 if actual_lxc != expected_lxc:
                     self.reload_reasons.append('lxc_conf ({0} => {1})'.format(actual_lxc, expected_lxc))
                     differing.append(container)
@@ -1063,7 +1071,7 @@ class DockerManager(object):
                     expected_binds.add("{0}:{1}:{2}".format(host_path, container_path, mode))
 
             actual_binds = set()
-            for bind in (container['HostConfig']['Binds'] or []):
+            for bind in (container['HostConfig'].get('Binds') or []):
                 if len(bind.split(':')) == 2:
                     actual_binds.add(bind + ":rw")
                 else:
@@ -1091,7 +1099,7 @@ class DockerManager(object):
 
                     expected_bound_ports[container_port] = [bind]
 
-            actual_bound_ports = container['HostConfig']['PortBindings'] or {}
+            actual_bound_ports = container['HostConfig'].get('PortBindings') or {}
 
             if actual_bound_ports != expected_bound_ports:
                 self.reload_reasons.append('port bindings ({0} => {1})'.format(actual_bound_ports, expected_bound_ports))
@@ -1118,7 +1126,7 @@ class DockerManager(object):
             for link, alias in (self.links or {}).iteritems():
                 expected_links.add("/{0}:{1}/{2}".format(link, container["Name"], alias))
 
-            actual_links = set(container['HostConfig']['Links'] or [])
+            actual_links = set(container['HostConfig'].get('Links') or [])
             if actual_links != expected_links:
                 self.reload_reasons.append('links ({0} => {1})'.format(actual_links, expected_links))
                 differing.append(container)
@@ -1126,7 +1134,7 @@ class DockerManager(object):
 
             # NETWORK MODE
 
-            expected_netmode = self.module.params.get('net') or ''
+            expected_netmode = self.module.params.get('net') or 'default'
             actual_netmode = container['HostConfig']['NetworkMode']
             if actual_netmode != expected_netmode:
                 self.reload_reasons.append('net ({0} => {1})'.format(actual_netmode, expected_netmode))
@@ -1136,7 +1144,7 @@ class DockerManager(object):
             # DNS
 
             expected_dns = set(self.module.params.get('dns') or [])
-            actual_dns = set(container['HostConfig']['Dns'] or [])
+            actual_dns = set(container['HostConfig'].get('Dns') or [])
             if actual_dns != expected_dns:
                 self.reload_reasons.append('dns ({0} => {1})'.format(actual_dns, expected_dns))
                 differing.append(container)
@@ -1145,7 +1153,7 @@ class DockerManager(object):
             # VOLUMES_FROM
 
             expected_volumes_from = set(self.module.params.get('volumes_from') or [])
-            actual_volumes_from = set(container['HostConfig']['VolumesFrom'] or [])
+            actual_volumes_from = set(container['HostConfig'].get('VolumesFrom') or [])
             if actual_volumes_from != expected_volumes_from:
                 self.reload_reasons.append('volumes_from ({0} => {1})'.format(actual_volumes_from, expected_volumes_from))
                 differing.append(container)
@@ -1230,6 +1238,11 @@ class DockerManager(object):
             changes = list(self.client.pull(image, tag=tag, stream=True, **extra_params))
             try:
                 last = changes[-1]
+                # seems Docker 1.8 puts an empty dict at the end of the
+                # stream; catch that and get the previous instead
+                # https://github.com/ansible/ansible-modules-core/issues/2043
+                if last.strip() == '{}':
+                    last = changes[-2]
             except IndexError:
                 last = '{}'
             status = json.loads(last).get('status', '')
@@ -1248,11 +1261,16 @@ class DockerManager(object):
             self.module.fail_json(msg="Failed to pull the specified image: %s" % resource, error=repr(e))
 
     def create_containers(self, count=1):
+        try:
+            mem_limit = _human_to_bytes(self.module.params.get('memory_limit'))
+        except ValueError as e:
+            self.module.fail_json(msg=str(e))
+        api_version = self.client.version()['ApiVersion']
+
         params = {'image':        self.module.params.get('image'),
                   'command':      self.module.params.get('command'),
                   'ports':        self.exposed_ports,
                   'volumes':      self.volumes,
-                  'mem_limit':    _human_to_bytes(self.module.params.get('memory_limit')),
                   'environment':  self.env,
                   'hostname':     self.module.params.get('hostname'),
                   'domainname':   self.module.params.get('domainname'),
@@ -1261,6 +1279,15 @@ class DockerManager(object):
                   'stdin_open':   self.module.params.get('stdin_open'),
                   'tty':          self.module.params.get('tty'),
                   }
+        if self.ensure_capability('host_config', fail=False):
+            params['host_config'] = self.get_host_config()
+
+        #For v1.19 API and above use HostConfig, otherwise use Config
+        if api_version < 1.19:
+            params['mem_limit'] = mem_limit
+        else:
+            params['host_config']['Memory'] = mem_limit
+
 
         if self.ensure_capability('host_config', fail=False):
             params['host_config'] = self.get_host_config()
