@@ -175,6 +175,7 @@ def yum_base(conf_file=None):
     my = yum.YumBase()
     my.preconf.debuglevel=0
     my.preconf.errorlevel=0
+    my.preconf.plugins = True
     if conf_file and os.path.exists(conf_file):
         my.preconf.fn = conf_file
     if os.geteuid() != 0:
@@ -220,7 +221,7 @@ def is_installed(module, repoq, pkgspec, conf_file, qf=def_qf, en_repos=None, di
             for rid in dis_repos:
                 my.repos.disableRepo(rid)
                 
-            e,m,u = my.rpmdb.matchPackageNames([pkgspec])
+            e, m, u = my.rpmdb.matchPackageNames([pkgspec])
             pkgs = e + m
             if not pkgs:
                 pkgs.extend(my.returnInstalledPackagesByDep(pkgspec))
@@ -232,16 +233,16 @@ def is_installed(module, repoq, pkgspec, conf_file, qf=def_qf, en_repos=None, di
     else:
 
         cmd = repoq + ["--disablerepo=*", "--pkgnarrow=installed", "--qf", qf, pkgspec]
-        rc,out,err = module.run_command(cmd)
+        rc, out, err = module.run_command(cmd)
         if not is_pkg:
             cmd = repoq + ["--disablerepo=*", "--pkgnarrow=installed", "--qf", qf, "--whatprovides", pkgspec]
-            rc2,out2,err2 = module.run_command(cmd)
+            rc2, out2, err2 = module.run_command(cmd)
         else:
-            rc2,out2,err2 = (0, '', '')
+            rc2, out2, err2 = (0, '', '')
             
         if rc == 0 and rc2 == 0:
             out += out2
-            return [ p for p in out.split('\n') if p.strip() ]
+            return [p for p in out.split('\n') if p.strip()]
         else:
             module.fail_json(msg='Error from repoquery: %s: %s' % (cmd, err + err2))
             
@@ -547,7 +548,7 @@ def install(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
                     module.fail_json(msg="Failure downloading %s, %s" % (spec, e))
 
         #groups :(
-        elif  spec.startswith('@'):
+        elif spec.startswith('@'):
             # complete wild ass guess b/c it's a group
             pkg = spec
 
@@ -614,7 +615,8 @@ def install(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
                 shutil.rmtree(tempdir)
             except Exception, e:
                 module.fail_json(msg="Failure deleting temp directory %s, %s" % (tempdir, e))
-            module.exit_json(changed=True)
+
+            module.exit_json(changed=True, results=res['results'], changes=dict(installed=pkgs))
 
         changed = True
 
@@ -682,7 +684,7 @@ def remove(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
         cmd = yum_basecmd + ["remove"] + pkgs
 
         if module.check_mode:
-            module.exit_json(changed=True)
+            module.exit_json(changed=True, results=res['results'], changes=dict(removed=pkgs))
 
         rc, out, err = module.run_command(cmd)
 
@@ -717,47 +719,84 @@ def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
     res['msg'] = ''
     res['changed'] = False
     res['rc'] = 0
+    pkgs = {}
+    pkgs['update'] = []
+    pkgs['install'] = []
+    updates = {}
+    update_all = False
+    cmd = None
 
-    for spec in items:
+    # determine if we're doing an update all
+    if '*' in items:
+        update_all = True
 
-        pkg = None
-        basecmd = 'update'
-        cmd = ''
-        # groups, again
-        if spec.startswith('@'):
-            pkg = spec
-        
-        elif spec == '*': #update all
-            # use check-update to see if there is any need
-            rc,out,err = module.run_command(yum_basecmd + ['check-update'])
-            if rc == 100:
-                cmd = yum_basecmd + [basecmd]
-            else:
-                res['results'].append('All packages up to date')
+    # run check-update to see if we have packages pending
+    rc, out, err = module.run_command(yum_basecmd + ['check-update'])
+    if rc == 0 and update_all:
+        res['results'].append('Nothing to do here, all packages are up to date')
+        module.exit_json(**res)
+    elif rc == 100:
+        available_updates = out.split('\n')
+        # build update dictionary
+        for line in available_updates:
+            line = line.split()
+            # ignore irrelevant lines
+            # FIXME... revisit for something less kludgy
+            if '*' in line or len(line) != 3 or '.' not in line[0]:
                 continue
-        
-        # dep/pkgname  - find it
-        else:
-            if is_installed(module, repoq, spec, conf_file, en_repos=en_repos, dis_repos=dis_repos):
-                basecmd = 'update'
             else:
-                basecmd = 'install'
+                pkg, version, repo = line
+                name, dist = pkg.rsplit('.', 1)
+                updates.update({name: {'version': version, 'dist': dist, 'repo': repo}})
+    elif rc == 1:
+        res['msg'] = err
+        res['rc'] = rc
+        module.fail_json(**res)
 
+    if update_all:
+        cmd = yum_basecmd + ['update']
+        will_update = set(updates.keys())
+        will_update_from_other_package = dict()
+    else:
+        will_update = set()
+        will_update_from_other_package = dict()
+        for spec in items:
+            # some guess work involved with groups. update @<group> will install the group if missing
+            if spec.startswith('@'):
+                pkgs['update'].append(spec)
+                continue
+            # dep/pkgname  - find it
+            else:
+                if is_installed(module, repoq, spec, conf_file, en_repos=en_repos, dis_repos=dis_repos):
+                    pkgs['update'].append(spec)
+                else:
+                    pkgs['install'].append(spec)
             pkglist = what_provides(module, repoq, spec, conf_file, en_repos=en_repos, dis_repos=dis_repos)
+            # FIXME..? may not be desirable to throw an exception here if a single package is missing
             if not pkglist:
                 res['msg'] += "No Package matching '%s' found available, installed or updated" % spec
                 module.fail_json(**res)
-            
+
             nothing_to_do = True
             for this in pkglist:
-                if basecmd == 'install' and is_available(module, repoq, this, conf_file, en_repos=en_repos, dis_repos=dis_repos):
+                if spec in pkgs['install'] and is_available(module, repoq, this, conf_file, en_repos=en_repos, dis_repos=dis_repos):
                     nothing_to_do = False
                     break
-                    
-                if basecmd == 'update' and is_update(module, repoq, this, conf_file, en_repos=en_repos, dis_repos=dis_repos):
+
+                # this contains the full NVR and spec could contain wildcards
+                # or virtual provides (like "python-*" or "smtp-daemon") while
+                # updates contains name only.
+                this_name_only = '-'.join(this.split('-')[:-2])
+                if spec in pkgs['update'] and this_name_only in updates.keys():
                     nothing_to_do = False
+                    will_update.add(spec)
+                    # Massage the updates list
+                    if spec != this_name_only:
+                        # For reporting what packages would be updated more
+                        # succinctly
+                        will_update_from_other_package[spec] = this_name_only
                     break
-                    
+
             if nothing_to_do:
                 res['results'].append("All packages providing %s are up to date" % spec)
                 continue
@@ -769,26 +808,56 @@ def latest(module, items, repoq, yum_basecmd, conf_file, en_repos, dis_repos):
                 res['msg'] += "The following packages have pending transactions: %s" % ", ".join(conflicts)
                 module.fail_json(**res)
 
-            pkg = spec
-        if not cmd:
-            cmd = yum_basecmd + [basecmd, pkg]
+    # check_mode output
+    if module.check_mode:
+        to_update = []
+        for w in will_update:
+            if w.startswith('@'):
+                to_update.append((w, None))
+                msg = '%s will be updated' % w
+            elif w not in updates:
+                other_pkg = will_update_from_other_package[w]
+                to_update.append((w, 'because of (at least) %s-%s.%s from %s' % (other_pkg, updates[other_pkg]['version'], updates[other_pkg]['dist'], updates[other_pkg]['repo'])))
+            else:
+                to_update.append((w, '%s.%s from %s' % (updates[w]['version'], updates[w]['dist'], updates[w]['repo'])))
 
-        if module.check_mode:
-            return module.exit_json(changed=True)
+        res['changes'] = dict(installed=pkgs['install'], updated=to_update)
 
-        rc, out, err = module.run_command(cmd)
-
-        res['rc'] += rc
-        res['results'].append(out)
-        res['msg'] += err
-
-        # FIXME if it is - update it and check to see if it applied
-        # check to see if there is no longer an update available for the pkgspec
-
-        if rc:
-            res['failed'] = True
-        else:
+        if len(will_update) > 0 or len(pkgs['install']) > 0:
             res['changed'] = True
+
+        module.exit_json(**res)
+
+    # run commands
+    if cmd:     # update all
+        rc, out, err = module.run_command(cmd)
+        res['changed'] = True
+    else:
+        if len(pkgs['install']) > 0:    # install missing
+            cmd = yum_basecmd + ['install'] + pkgs['install']
+            rc, out, err = module.run_command(cmd)
+            res['changed'] = True
+        else:
+            rc, out, err = [0, '', '']
+
+        if len(will_update) > 0:     # update present
+            cmd = yum_basecmd + ['update'] + pkgs['update']
+            rc2, out2, err2 = module.run_command(cmd)
+            res['changed'] = True
+        else:
+            rc2, out2, err2 = [0, '', '']
+
+    if not update_all:
+        rc += rc2
+        out += out2
+        err += err2
+
+    res['rc'] += rc
+    res['msg'] += err
+    res['results'].append(out)
+
+    if rc:
+        res['failed'] = True
 
     module.exit_json(**res)
 
@@ -920,4 +989,3 @@ from ansible.module_utils.basic import *
 from ansible.module_utils.urls import *
 if __name__ == '__main__':
     main()
-
